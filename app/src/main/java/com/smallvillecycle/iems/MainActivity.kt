@@ -1,35 +1,37 @@
 package com.smallvillecycle.iems
 
 import android.Manifest
-import android.app.Activity
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
-import android.content.BroadcastReceiver
-import android.content.Context
+import android.bluetooth.BluetoothSocket
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
-import androidx.annotation.RequiresApi
-import androidx.compose.foundation.background
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Scaffold
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -39,174 +41,334 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 import com.smallvillecycle.iems.ui.theme.Green40
 import com.smallvillecycle.iems.ui.theme.Green80
 import com.smallvillecycle.iems.ui.theme.GreenGrey40
 import com.smallvillecycle.iems.ui.theme.GreenGrey80
-import com.smallvillecycle.iems.ui.theme.IEMSTheme
 import com.smallvillecycle.iems.ui.theme.Lime40
+import kotlinx.coroutines.launch
+import java.io.InputStream
+import java.io.OutputStream
 import java.util.UUID
 
 enum class ConnectionStatus { CONNECTED, CONNECTING, OFFLINE, NOT_PAIRED }
-object ReqCodes{
+object ReqCodes {
     const
     val REQUEST_ENABLE_BT: Int = 0
+
     const
     val REQUEST_DISCOVERABLE_BT: Int = 0
 }
 
-class MainActivity : ComponentActivity() {
+object Control {
+    public var device: BluetoothDevice? = null
+}
 
-    @RequiresApi(Build.VERSION_CODES.S)
+class MainActivity : ComponentActivity() {
+    private val bluetoothAdapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
+    private var bluetoothSocket: BluetoothSocket? = null
+    private var inputStream: InputStream? = null
+    private var outputStream: OutputStream? = null
+    private val ESP32_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+
+    private val requestPermissionsLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+            val granted = permissions[Manifest.permission.BLUETOOTH] == true &&
+                    permissions[Manifest.permission.BLUETOOTH_ADMIN] == true
+            if (granted) {
+                discoverDevices()
+            } else {
+                Toast.makeText(this, "Bluetooth permissions are required", Toast.LENGTH_LONG).show()
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        val mBluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
-        if (mBluetoothAdapter == null) {
-            Toast.makeText(this,"device not supported",Toast.LENGTH_SHORT).show();
-        }
-        if (!mBluetoothAdapter.isEnabled) {
-            val enableBtIntent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
-            if (ActivityCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.BLUETOOTH_CONNECT
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-
-            }
-            startActivityForResult(enableBtIntent, ReqCodes.REQUEST_ENABLE_BT)
-        }
-
+        checkPermissions()
         setContent {
-            IEMSTheme {
-                Scaffold(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.White)
-                ) { innerPadding ->
-                    RequestBluetoothPermissions()
-                    EnergyDashboard(
-                        output1Power = 100f,
-                        output2Power = 150f,
-                        lightIntensity = 4f,
-                        isSolarEnabled1 = false,
-                        isSolarEnabled2 = false,
-                        modifier = Modifier.padding(innerPadding)
-                    )
-                }
-            }
+            AppUI()
         }
     }
-}
 
-@RequiresApi(Build.VERSION_CODES.S)
-@Composable
-fun EnergyDashboard(
-    output1Power: Float,
-    output2Power: Float,
-    lightIntensity: Float,
-    isSolarEnabled1: Boolean,
-    isSolarEnabled2: Boolean,
-    modifier: Modifier = Modifier.fillMaxSize()
-) {
-    var connectionStatus by remember { mutableStateOf(ConnectionStatus.NOT_PAIRED) }
-
-    var powerConsumption by remember { mutableFloatStateOf(0f) }
-    var pairedDevice by remember { mutableStateOf<BluetoothDevice?>(null) }
-
-    Column(modifier = modifier.padding(16.dp)) {
-        Text(
-            "Intelligent Energy Management", fontSize = 24.sp, fontWeight = FontWeight.Bold,
-            color = Color.Black
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        val message = when (connectionStatus) {
-            ConnectionStatus.NOT_PAIRED -> "No Paired Device"
-            ConnectionStatus.OFFLINE -> "Device Offline"
-            else -> ""
-        }
-
-        val buttonText = when (connectionStatus) {
-            ConnectionStatus.NOT_PAIRED -> "Pair Device"
-            ConnectionStatus.OFFLINE -> "Reconnect"
-            else -> ""
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth()
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+    private fun checkPermissions() {
+        if (checkSelfPermission(Manifest.permission.BLUETOOTH) != PackageManager.PERMISSION_GRANTED ||
+            checkSelfPermission(Manifest.permission.BLUETOOTH_ADMIN) != PackageManager.PERMISSION_GRANTED
         ) {
-            Text(message, fontSize = 20.sp, color = Green40)
+            requestPermissionsLauncher.launch(
+                arrayOf(
+                    Manifest.permission.BLUETOOTH,
+                    Manifest.permission.BLUETOOTH_ADMIN
+                )
+            )
+        } else {
+            discoverDevices()
+        }
+    }
 
-            if (buttonText.isNotEmpty()) {
-                Button(onClick = {  }) {
-                    Text(buttonText)
+    @Composable
+    fun AppUI() {
+        var receivedData by remember { mutableStateOf("") }
+        var devices by remember { mutableStateOf(listOf<BluetoothDevice>()) }
+        var isConnected by remember { mutableStateOf(false) }
+        var showDeviceModal by remember { mutableStateOf(false) }
+        var connectionStatus by remember { mutableStateOf(ConnectionStatus.NOT_PAIRED) }
+        var lightIntensity by remember {
+            mutableFloatStateOf(0f)
+        }
+
+        LaunchedEffect(Unit) {
+            devices = getPairedDevices()
+            if (devices.isEmpty()) showDeviceModal = true
+        }
+
+        if (showDeviceModal) {
+            AlertDialog(
+                onDismissRequest = { showDeviceModal = false },
+                title = { Text("Select Device") },
+                text = {
+                    if (devices.isEmpty()) {
+                        LaunchedEffect(Unit) {
+                            devices = getPairedDevices()
+                        }
+                    }
+                    LazyColumn {
+                        items(devices) { device ->
+                            Row(
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                var loading by remember {
+                                    mutableStateOf(false)
+                                }
+                                val coroutineScope = rememberCoroutineScope()
+                                Button(
+                                    onClick = {
+                                        loading = true
+                                        coroutineScope.launch {
+                                            isConnected = connectToDevice(device)
+                                            loading = false
+                                            Control.device = device
+                                            showDeviceModal = false
+                                        }
+                                        Control.device = device
+                                        showDeviceModal = false
+
+                                    }, modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(5.dp)
+                                ) {
+                                    Text(device.name ?: device.address)
+
+                                }
+                                if (loading) {
+                                    CircularProgressIndicator(
+                                        color = GreenGrey40
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = { showDeviceModal = false }) {
+                        Text("Cancel")
+                    }
+                }, dismissButton = {
+                    Button(onClick = { openBluetoothSettings() }) {
+                        Text("Not found")
+                    }
+
+                }
+            )
+        }
+
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("IEMS", style = MaterialTheme.typography.headlineSmall)
+            Spacer(modifier = Modifier.height(16.dp))
+
+            var message = when (connectionStatus) {
+                ConnectionStatus.NOT_PAIRED -> "No Paired Device"
+                ConnectionStatus.OFFLINE -> "Device Offline"
+                else -> ""
+            }
+
+            val buttonText = when (connectionStatus) {
+                ConnectionStatus.NOT_PAIRED -> "Pair Device"
+                ConnectionStatus.OFFLINE -> "Reconnect"
+                else -> ""
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(message, fontSize = 20.sp, color = Green40)
+
+                if (buttonText.isNotEmpty()) {
+                    Button(onClick = { showDeviceModal = true }) {
+                        Text(buttonText)
+                    }
                 }
             }
+            Spacer(modifier = Modifier.height(16.dp))
+
+            if (isConnected) {
+                ControlScreen(
+                    title = "Output A",
+                    onDisconnect = { connectionStatus = ConnectionStatus.OFFLINE },
+                    onSend = { data ->
+                        sendData("outA$data")
+                    }
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                ControlScreen(
+                    title = "Output B",
+                    onDisconnect = { connectionStatus = ConnectionStatus.OFFLINE },
+                    onSend = { data ->
+                        sendData("outB$data")
+                    }
+                )
+
+                Text("Light Intensity: $lightIntensity lux", color = Color.Black)
+            }
         }
-        Spacer(modifier = Modifier.height(16.dp))
-        ControlScreen(
-            title = "Output A",
-            power = powerConsumption,
-            onDisconnect = { connectionStatus = ConnectionStatus.OFFLINE }
-        )
-        Spacer(modifier = Modifier.height(16.dp))
-        ControlScreen(
-            title = "Output B",
-            power = powerConsumption,
-            onDisconnect = { connectionStatus = ConnectionStatus.OFFLINE }
-        )
-
-        Text("Light Intensity: $lightIntensity lux", color = Color.Black)
-
     }
+
+    private fun openBluetoothSettings() {
+        val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
+        startActivity(intent)
+    }
+
+    private fun discoverDevices() {
+        val pairedDevices: Set<BluetoothDevice>? = bluetoothAdapter?.bondedDevices
+        pairedDevices?.let {
+            val deviceList = it.filter { device -> device.name == "IEMS-LomTechnology" }
+            Log.d("Bluetooth", "Found ${deviceList.size} paired devices")
+        }
+    }
+
+    private fun getPairedDevices(): List<BluetoothDevice> {
+        return bluetoothAdapter?.bondedDevices?.filter { device -> device.name == "IEMS-LomTechnology" }
+            ?: emptyList()
+    }
+
+    private fun connectToDevice(device: BluetoothDevice): Boolean {
+        try {
+            bluetoothSocket = device.createRfcommSocketToServiceRecord(ESP32_UUID)
+            bluetoothSocket?.connect()
+            inputStream = bluetoothSocket?.inputStream
+            outputStream = bluetoothSocket?.outputStream
+            Toast.makeText(this, "Connected to ESP32", Toast.LENGTH_SHORT).show()
+            return true
+        } catch (e: Exception) {
+            Log.e("Bluetooth", "Connection failed", e)
+            Toast.makeText(this, "Failed to connect", Toast.LENGTH_SHORT).show()
+            return false
+        }
+    }
+
+    private fun sendData(data: String) {
+        try {
+            outputStream?.write(data.toByteArray())
+            Toast.makeText(this, "Data sent!", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Log.e("Bluetooth", "Send failed", e)
+        }
+    }
+
+    private fun receiveData(): String {
+        return try {
+            val buffer = ByteArray(1024)
+            val bytes = inputStream?.read(buffer)
+            bytes?.let { String(buffer, 0, it) } ?: "No data received"
+        } catch (e: Exception) {
+            Log.e("Bluetooth", "Receive failed", e)
+            "Error receiving data"
+        }
+    }
+
+    private fun listenForData() {
+        Thread {
+            while (true) {
+                val receivedData = receiveData()
+                if (receivedData.isNotBlank() && receivedData != "No data received" && receivedData != "Error receiving data") {
+                    runOnUiThread {
+                        Log.d("Bluetooth", "📩 Data received: $receivedData")
+                        handleReceivedData(receivedData)
+                    }
+                }
+            }
+        }.start()
+    }
+
+    private fun handleReceivedData(data: String) {
+        val delimiterIndex = data.indexOf("--src--")
+        if (delimiterIndex != -1) {
+            val output = data.substring(0, delimiterIndex)
+            val source = data.substring(delimiterIndex + 7)
+
+            when (output) {
+                "outA" -> {
+                    when (source) {
+                        "solar" -> showToast("Output A switched to Solar")
+                        "grid" -> showToast("Output A switched to Grid")
+                        else -> showToast("Unknown source for Output A: $source")
+                    }
+                }
+                "outB" -> {
+                    when (source) {
+                        "solar" -> showToast("Output B switched to Solar")
+                        "grid" -> showToast("Output B switched to Grid")
+                        else -> showToast("Unknown source for Output B: $source")
+                    }
+                }
+                else -> showToast("Unknown output: $output")
+            }
+        } else {
+            showToast("Received raw data: $data")
+        }
+    }
+
+    private fun showToast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+
 }
 
 @Composable
-fun BluetoothConnectionManager() {
-    var pairedDevice by remember { mutableStateOf<BluetoothDevice?>(null) }
-    var connectionStatus by remember { mutableStateOf(ConnectionStatus.NOT_PAIRED) }
-
-    when (connectionStatus) {
-        ConnectionStatus.NOT_PAIRED -> {
-            ScanForDevices { device ->
-                pairedDevice = device
-                connectionStatus = ConnectionStatus.CONNECTING
-            }
-        }
-
-        ConnectionStatus.CONNECTING -> {
-            pairedDevice?.let { device ->
-                ConnectToDevice(device) { connected ->
-                    connectionStatus = if (connected) ConnectionStatus.CONNECTED else ConnectionStatus.OFFLINE
-                }
-            }
-        }
-
-        ConnectionStatus.CONNECTED -> {
-
-        }
-
-        ConnectionStatus.OFFLINE -> {
-            OfflineScreen(onReconnect = { connectionStatus = ConnectionStatus.NOT_PAIRED })
-        }
+fun ControlScreen(
+    title: String,
+    onDisconnect: () -> Unit,
+    onSend: (String) -> Unit
+) {
+    var isSolarEnabled by remember { mutableStateOf(false) }
+    var power by remember { mutableFloatStateOf(0f) }
+    Column(modifier = Modifier.padding(4.dp)) {
+        EnergyCard(
+            title = title,
+            power = power,
+            isSolarEnabled = isSolarEnabled,
+//            connectionStatus = ConnectionStatus.CONNECTED,
+            onToggle = {
+                isSolarEnabled = !isSolarEnabled
+                val label = if(isSolarEnabled) "solar" else "grid"
+                onSend("--src--$label")
+            },
+//            onReconnect = onDisconnect,
+//            onScanAndPair = {}
+        )
     }
 }
-
 
 @Composable
 fun EnergyCard(title: String, power: Float, isSolarEnabled: Boolean, onToggle: () -> Unit) {
@@ -250,139 +412,4 @@ fun EnergyCard(title: String, power: Float, isSolarEnabled: Boolean, onToggle: (
             }
         }
     }
-}
-
-@Composable
-fun ControlScreen(
-    title:String,
-    power: Float,
-    onDisconnect: () -> Unit
-) {
-    var isSolarEnabled by remember { mutableStateOf(false) }
-    Column(modifier = Modifier.padding(4.dp)) {
-        EnergyCard(
-            title = title,
-            power = power,
-            isSolarEnabled = isSolarEnabled,
-//            connectionStatus = ConnectionStatus.CONNECTED,
-            onToggle = { isSolarEnabled = !isSolarEnabled },
-//            onReconnect = onDisconnect,
-//            onScanAndPair = {}
-        )
-    }
-}
-
-
-@Composable
-fun OfflineScreen(onReconnect: () -> Unit) {
-    Column(
-        modifier = Modifier.fillMaxSize(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text("Device Offline", fontSize = 20.sp, color = Green40)
-        Button(onClick = onReconnect) {
-            Text("Reconnect")
-        }
-    }
-}
-
-@Composable
-fun ConnectToDevice(device: BluetoothDevice, onResult: (Boolean) -> Unit) {
-    val uuid = device.uuids?.firstOrNull()?.uuid ?: UUID.randomUUID()
-    val context = LocalContext.current
-
-    // Check for BLUETOOTH_CONNECT permission
-    if (ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.BLUETOOTH_CONNECT
-        ) == PackageManager.PERMISSION_GRANTED
-    ) {
-        try {
-            val socket = device.createRfcommSocketToServiceRecord(uuid)
-            socket.connect()
-            onResult(true) // Connection successful
-        } catch (e: Exception) {
-            e.printStackTrace()
-            onResult(false) // Connection failed
-        }
-    } else {
-        // Request permission if not granted
-        RequestBluetoothPermissions()
-    }
-}
-
-@Composable
-fun ScanForDevices(onDeviceFound: (BluetoothDevice) -> Unit) {
-    val context = LocalContext.current
-    val bluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
-
-    if (bluetoothAdapter?.isEnabled == true) {
-        // Check for permissions
-        if (ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.BLUETOOTH_SCAN
-            ) == PackageManager.PERMISSION_GRANTED
-        ) {
-            val discoveryReceiver = object : BroadcastReceiver() {
-                override fun onReceive(context: Context?, intent: Intent?) {
-                    val action = intent?.action
-                    if (action == BluetoothDevice.ACTION_FOUND) {
-                        val device: BluetoothDevice? =
-                            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-                        device?.let { onDeviceFound(it) }
-                    }
-                }
-            }
-
-            val filter = IntentFilter(BluetoothDevice.ACTION_FOUND)
-            context.registerReceiver(discoveryReceiver, filter)
-            bluetoothAdapter.startDiscovery()
-        } else {
-            // Request the missing permission
-            RequestBluetoothPermissions()
-        }
-    }
-}
-
-
-@Composable
-fun RequestBluetoothPermissions() {
-    val context = LocalContext.current
-        val permissions = arrayOf(
-            Manifest.permission.BLUETOOTH,
-            Manifest.permission.BLUETOOTH_ADMIN,
-            Manifest.permission.ACCESS_FINE_LOCATION,
-        )
-
-        LaunchedEffect(Unit) {
-            if (permissions.any {
-                    ContextCompat.checkSelfPermission(
-                        context,
-                        it
-                    ) != PackageManager.PERMISSION_GRANTED
-                }) {
-                ActivityCompat.requestPermissions(
-                    context as Activity,
-                    permissions,
-                    ReqCodes.REQUEST_ENABLE_BT
-                )
-            }
-        }
-
-}
-
-
-
-@RequiresApi(Build.VERSION_CODES.S)
-@Preview
-@Composable
-fun Bh(){
-    EnergyDashboard(
-        output1Power = 100f,
-        output2Power = 150f,
-        lightIntensity = 4f,
-        isSolarEnabled1 = false,
-        isSolarEnabled2 = false,
-    )
 }

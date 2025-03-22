@@ -1,0 +1,231 @@
+package com.smallvillecycle.iems
+
+import android.Manifest
+import android.bluetooth.*
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
+import android.provider.Settings
+import android.util.Log
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresApi
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.font.FontWeight
+import androidx.core.app.ActivityCompat
+import java.io.InputStream
+import java.io.OutputStream
+import java.util.*
+
+class MainActivity : ComponentActivity() {
+    private val bluetoothAdapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
+    private var bluetoothSocket: BluetoothSocket? = null
+    private var inputStream: InputStream? = null
+    private var outputStream: OutputStream? = null
+    private val ESP32_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+
+    private val requestPermissionsLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+            val granted = permissions[Manifest.permission.BLUETOOTH_CONNECT] == true &&
+                    permissions[Manifest.permission.BLUETOOTH_SCAN] == true
+            if (granted) {
+                discoverDevices()
+            } else {
+                Toast.makeText(this, "Bluetooth permissions are required", Toast.LENGTH_LONG).show()
+            }
+        }
+
+    @RequiresApi(Build.VERSION_CODES.M)
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            checkPermissions()
+            EnergyDashboardUI()
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.M)
+    private fun checkPermissions() {
+        if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED ||
+            checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissionsLauncher.launch(
+                arrayOf(
+                    Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.BLUETOOTH_SCAN
+                )
+            )
+        } else {
+            discoverDevices()
+        }
+    }
+
+    private fun discoverDevices() {
+        val pairedDevices: Set<BluetoothDevice>? = if (ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.BLUETOOTH_CONNECT
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        } else
+            bluetoothAdapter?.bondedDevices
+        pairedDevices?.let {
+            val deviceList = it.filter { device -> device.name == "IEMS-LomTechnology" }
+            Log.d("Bluetooth", "Found ${deviceList.size} paired devices with name IEMS-LomTech")
+        }
+    }
+
+    private fun connectToDevice(device: BluetoothDevice) {
+        try {
+            if (ActivityCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.BLUETOOTH_CONNECT
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                return
+            }
+            bluetoothSocket = device.createRfcommSocketToServiceRecord(ESP32_UUID)
+            bluetoothSocket?.connect()
+            inputStream = bluetoothSocket?.inputStream
+            outputStream = bluetoothSocket?.outputStream
+            Toast.makeText(this, "Connected to ESP32", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Log.e("Bluetooth", "Connection failed", e)
+            Toast.makeText(this, "Failed to connect", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun sendCommandToESP(command: String) {
+        try {
+            outputStream?.write(command.toByteArray())
+        } catch (e: Exception) {
+            Log.e("Bluetooth", "Failed to send command", e)
+        }
+    }
+
+    @Composable
+    fun EnergyDashboardUI() {
+        var devices by remember { mutableStateOf(listOf<BluetoothDevice>()) }
+        var selectedDevice by remember { mutableStateOf<BluetoothDevice?>(null) }
+        var showDeviceModal by remember { mutableStateOf(false) }
+
+        LaunchedEffect(devices) {
+            if (devices.isEmpty()) showDeviceModal = true
+        }
+
+        EnergyDashboard(
+            output1Power = 0f,
+            output2Power = 0f,
+            lightIntensity = 0f,
+            isSolarEnabled1 = false,
+            isSolarEnabled2 = false,
+            onToggleOutput = { output, isSolar ->
+                val command = if (isSolar) "$output--src--solar" else "$output--src--grid"
+                sendCommandToESP(command)
+            },
+            onSelectDevice = { showDeviceModal = true }
+        )
+
+        if (showDeviceModal) {
+            AlertDialog(
+                onDismissRequest = { showDeviceModal = false },
+                title = { Text("Select Device") },
+                text = {
+                    LazyColumn {
+                        items(devices) { device ->
+                            Button(onClick = {
+                                connectToDevice(device)
+                                selectedDevice = device
+                                showDeviceModal = false
+                            }) {
+                                Text(device.name ?: device.address)
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = { showDeviceModal = false }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+    }
+
+    @Composable
+    fun EnergyDashboard(
+        output1Power: Float,
+        output2Power: Float,
+        lightIntensity: Float,
+        isSolarEnabled1: Boolean,
+        isSolarEnabled2: Boolean,
+        onToggleOutput: (String, Boolean) -> Unit,
+        onSelectDevice: () -> Unit
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            Text("Intelligent Energy Management", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Button(onClick = onSelectDevice) {
+                Text("Select Device")
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            ControlScreen("Output A", output1Power, "out1", isSolarEnabled1, onToggleOutput)
+            Spacer(modifier = Modifier.height(16.dp))
+            ControlScreen("Output B", output2Power, "out2", isSolarEnabled2, onToggleOutput)
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("Light Intensity: $lightIntensity lux")
+        }
+    }
+
+    @Composable
+    fun ControlScreen(
+        title: String,
+        power: Float,
+        output: String,
+        isSolarEnabled: Boolean,
+        onToggleOutput: (String, Boolean) -> Unit
+    ) {
+        var isSolar by remember { mutableStateOf(isSolarEnabled) }
+        EnergyCard(title = title, power = power, isSolarEnabled = isSolar) {
+            isSolar = !isSolar
+            onToggleOutput(output, isSolar)
+        }
+    }
+
+    @Composable
+    fun EnergyCard(title: String, power: Float, isSolarEnabled: Boolean, onToggle: () -> Unit) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(title, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text("Power: ${power}W")
+                Switch(
+                    checked = isSolarEnabled,
+                    onCheckedChange = { onToggle() }
+                )
+            }
+        }
+    }
+}
+
+// Now, toggling the switch sends the correct command to the ESP32! 🚀
